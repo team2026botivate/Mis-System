@@ -34,6 +34,36 @@ const AdminTodayTasks = () => {
     return { sheetName, colIndex, startRowIndex };
   }, []);
 
+  const parseDate = useCallback((val) => {
+    if (!val) return null;
+    if (val instanceof Date) return val;
+    
+    const str = String(val).trim();
+    if (!str) return null;
+
+    // A valid date string must contain either '/' or '-'
+    if (!str.includes('/') && !str.includes('-')) {
+      return null;
+    }
+
+    // Handle DD/MM/YYYY
+    if (str.includes('/')) {
+      const parts = str.split('/');
+      if (parts.length === 3) {
+        const d = parseInt(parts[0], 10);
+        const m = parseInt(parts[1], 10) - 1;
+        const y = parseInt(parts[2], 10);
+        if (y > 1970) {
+          const date = new Date(y, m, d);
+          if (!isNaN(date.getTime())) return date;
+        }
+      }
+    }
+
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+  }, []);
+
   // Fetch Data from Google Sheet
   useEffect(() => {
     const fetchData = async () => {
@@ -59,7 +89,7 @@ const AdminTodayTasks = () => {
         const imageMap = {};
         if (masterResult.success && Array.isArray(masterResult.data)) {
           masterResult.data.slice(1).forEach(row => {
-            const name = row[0] ? String(row[0]).trim().toLowerCase() : "";
+            const name = row[0] ? String(row[0]).trim().replace(/\s+/g, ' ').toLowerCase() : "";
             const imageUrl = row[4];
             if (name && imageUrl) imageMap[name] = imageUrl;
           });
@@ -74,7 +104,7 @@ const AdminTodayTasks = () => {
             .filter(row => row[2] && String(row[2]).trim() !== "")
             .map((row, index) => {
               const empName = row[2] || "Unknown";
-              const normalizedName = String(empName).trim().toLowerCase();
+              const normalizedName = String(empName).trim().replace(/\s+/g, ' ').toLowerCase();
               let finalImageUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(empName)}&background=0D8ABC&color=fff&size=128`;
               const rawImageUrl = imageMap[normalizedName];
               if (rawImageUrl) {
@@ -121,21 +151,39 @@ const AdminTodayTasks = () => {
 
       await Promise.all(Object.values(sheetGroups).map(async (group) => {
         try {
-          const res = await fetch(`${group.scriptUrl}?sheet=${encodeURIComponent(group.sheetName)}`);
-          const result = await res.json();
-          if (!result.success || !Array.isArray(result.data)) return;
-          const sheetData = result.data;
+          const cacheKey = `${group.scriptUrl}|${group.sheetName}`;
+          window.__sheetDataCache = window.__sheetDataCache || {};
+
+          let sheetData = window.__sheetDataCache[cacheKey];
+          if (!sheetData) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 6000); // 6 seconds timeout
+
+            const res = await fetch(`${group.scriptUrl}?sheet=${encodeURIComponent(group.sheetName)}`, {
+              signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            const result = await res.json();
+            if (result.success && Array.isArray(result.data)) {
+              sheetData = result.data;
+              window.__sheetDataCache[cacheKey] = result.data;
+            }
+          }
+
+          if (!sheetData) return;
           group.taskIndices.forEach((taskIdx) => {
             const row = dataSheetRows[taskIdx];
-            const nameRef = parseSheetRef(row[9]);
+            const nameRef = parseSheetRef(row[6]);
             const plannedRef = parseSheetRef(row[7]);
             const personName = String(row[4] || "").trim();
             if (!nameRef || !plannedRef) return;
             let todayCount = 0;
             sheetData.slice(nameRef.startRowIndex).forEach((r) => {
-              if (String(r[nameRef.colIndex] || "").trim() === personName) {
-                const d = new Date(r[plannedRef.colIndex]);
-                if (!isNaN(d.getTime()) && d.toLocaleDateString('en-GB') === todayDate) todayCount++;
+              const sheetName = String(r[nameRef.colIndex] || "").trim().replace(/\s+/g, ' ').toLowerCase();
+              const targetName = personName.replace(/\s+/g, ' ').toLowerCase();
+              if (sheetName === targetName) {
+                const d = parseDate(r[plannedRef.colIndex]);
+                if (d && d.toLocaleDateString('en-GB') === todayDate) todayCount++;
               }
             });
             counts[taskIdx] = todayCount;
@@ -154,8 +202,8 @@ const AdminTodayTasks = () => {
   const enrichedTasks = useMemo(() => {
     return dataSheetRows.map((row, idx) => {
       const personName = row[4] ? String(row[4]).trim() : "Unknown";
-      const normalizedName = personName.toLowerCase();
-      const employee = sheetEmployees.find(e => e.name.toLowerCase() === normalizedName);
+      const normalizedName = personName.replace(/\s+/g, ' ').toLowerCase();
+      const employee = sheetEmployees.find(e => String(e.name || "").trim().replace(/\s+/g, ' ').toLowerCase() === normalizedName);
       return {
         id: `task-${idx}`,
         fmsName: row[2] || "N/A",
@@ -169,7 +217,7 @@ const AdminTodayTasks = () => {
         scriptUrl: row[25] || "",
         plannedSheetRef: row[7] || "",
         actualSheetRef: row[8] || "",
-        nameColRef: row[9] || "",
+        nameColRef: row[6] || "",
         taskNameColRef: row[26] || ""
       };
     });
@@ -245,15 +293,17 @@ const AdminTodayTasks = () => {
 
         const formatDate = (val) => {
           if (!val) return "";
-          const d = new Date(val);
-          return isNaN(d.getTime()) ? String(val) : `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+          const d = parseDate(val);
+          return !d ? String(val) : `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
         };
 
         const matchingIndices = [];
         if (nameP && nameP.sheetName) {
           const rows = cache[nameP.sheetName] || [];
           rows.slice(nameP.startRowIndex).forEach((r, idx) => {
-            if (String(r[nameP.colIndex] || "").trim() === task.personName) matchingIndices.push(idx);
+            const sheetName = String(r[nameP.colIndex] || "").trim().replace(/\s+/g, ' ').toLowerCase();
+            const targetName = String(task.personName || "").trim().replace(/\s+/g, ' ').toLowerCase();
+            if (sheetName === targetName) matchingIndices.push(idx);
           });
         }
 
@@ -272,7 +322,8 @@ const AdminTodayTasks = () => {
 
         for (let i = 0; i < Math.max(pVals.length, aVals.length, tVals.length); i++) {
           const raw = pVals[i]?.val;
-          if (raw && new Date(raw).toLocaleDateString('en-GB') === todayDate) {
+          const d = parseDate(raw);
+          if (d && d.toLocaleDateString('en-GB') === todayDate) {
             compiledRows.push({
               fmsName: task.fmsName,
               taskName: tVals[i]?.formatted || "",

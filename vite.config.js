@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0', // Allow external access from mobile devices
-    port: 5173,
+    port: 5174,
     strictPort: false,
     open: false,
   },

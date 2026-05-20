@@ -240,7 +240,7 @@ const AdminDashboard = () => {
         const designationMap = {};
         if (masterResult.success && Array.isArray(masterResult.data)) {
           masterResult.data.slice(1).forEach(row => {
-            const name = row[0] ? String(row[0]).trim().toLowerCase() : "";
+            const name = row[0] ? String(row[0]).trim().replace(/\s+/g, ' ').toLowerCase() : "";
             const designation = row[3] ? String(row[3]).trim() : "";
             const imageUrl = row[4];
             if (name) {
@@ -324,7 +324,7 @@ const AdminDashboard = () => {
             .map((row, index) => {
               const randomId = `emp-${100 + index}`;
               const empName = row[2] || "Unknown";
-              const normalizedName = String(empName).trim().toLowerCase();
+              const normalizedName = String(empName).trim().replace(/\s+/g, ' ').toLowerCase();
               const archivedData = newArchivedMap[empName] ? newArchivedMap[empName].values : {};
 
               const rawImageUrl = imageMap[normalizedName];
@@ -600,16 +600,16 @@ const AdminDashboard = () => {
   };
 
   const handleRowClick = (employee) => {
-    const personName = String(employee.name).trim();
+    const personName = String(employee.name).trim().replace(/\s+/g, ' ').toLowerCase();
     const matchingRows = dataSheetRows.filter(row => {
-      const dataName = row[4] ? String(row[4]).trim() : "";
+      const dataName = row[4] ? String(row[4]).trim().replace(/\s+/g, ' ').toLowerCase() : "";
       return dataName === personName;
     });
 
     const tasks = matchingRows.map(row => ({
       fmsName: row[2] || "",
       taskName: row[3] || "",
-      nameColRef: row[9] || "",
+      nameColRef: row[6] || "",
       taskNameColRef: row[26] || "",
       department: row[0] || "",
       sheetId: row[5] || "",
@@ -654,13 +654,8 @@ const AdminDashboard = () => {
 
   const handleDrillDown = async (task, type, value, event) => {
     event.stopPropagation();
-    if (value === 0) return;
 
     const scriptUrl = String(task.scriptUrl || "").trim();
-    if (!scriptUrl) {
-      console.error("No App Script URL found in Data sheet Column Z for task:", task.taskName);
-      return;
-    }
 
     const plannedParsed = parseSheetRef(task.plannedSheetRef);
     const actualParsed = parseSheetRef(task.actualSheetRef);
@@ -678,7 +673,12 @@ const AdminDashboard = () => {
     });
 
     try {
-      const employeeName = String(selectedUserDetails?.name || "").trim();
+      const employeeName = String(selectedUserDetails?.name || "").trim().replace(/\s+/g, ' ').toLowerCase();
+
+      console.log("--- DRILLDOWN DEBUG START ---");
+      console.log("Task details:", task);
+      console.log("Employee to search:", employeeName);
+      console.log("Parsed refs:", { plannedParsed, actualParsed, nameParsed, taskNameParsed, delayParsed });
 
       const sheetDataCache = {};
       const sheetsToFetch = new Set();
@@ -688,10 +688,60 @@ const AdminDashboard = () => {
       if (taskNameParsed?.sheetName) sheetsToFetch.add(taskNameParsed.sheetName);
       if (delayParsed?.sheetName) sheetsToFetch.add(delayParsed.sheetName);
 
+      console.log("Sheets list to fetch:", Array.from(sheetsToFetch));
+
+      window.__sheetDataCache = window.__sheetDataCache || {};
+      const mainScriptUrl = import.meta.env.VITE_APPS_SCRIPT_URL || "";
+      const spreadsheetId = String(task.sheetId || "").trim();
+      const sheetFetchErrors = {};
+
       const fetchPromises = [...sheetsToFetch].map(async (name) => {
-        const res = await fetch(`${scriptUrl}?sheet=${encodeURIComponent(name)}`);
-        const result = await res.json();
-        sheetDataCache[name] = (result.success && Array.isArray(result.data)) ? result.data : [];
+        const urlsToTry = [scriptUrl, mainScriptUrl]
+          .map(u => String(u || "").trim())
+          .filter(u => u.startsWith("http"));
+        let success = false;
+        const errors = [];
+
+        for (const url of urlsToTry) {
+          const cacheKey = `${url}|${spreadsheetId}|${name}`;
+          if (window.__sheetDataCache[cacheKey]) {
+            sheetDataCache[name] = window.__sheetDataCache[cacheKey];
+            success = true;
+            break;
+          } else {
+            try {
+              const separator = url.includes('?') ? '&' : '?';
+              let fetchUrl = `${url}${separator}sheet=${encodeURIComponent(name)}`;
+              if (spreadsheetId) {
+                fetchUrl += `&spreadsheetId=${encodeURIComponent(spreadsheetId)}`;
+              }
+
+              const res = await fetch(fetchUrl);
+              
+              if (!res.ok) {
+                throw new Error(`HTTP error ${res.status}`);
+              }
+              
+              const result = await res.json();
+              if (result.success && Array.isArray(result.data)) {
+                sheetDataCache[name] = result.data;
+                window.__sheetDataCache[cacheKey] = result.data;
+                success = true;
+                break;
+              } else {
+                throw new Error(result.message || result.error || "API returned success: false or invalid format");
+              }
+            } catch (err) {
+              console.error(`Fetch failed for sheet ${name} using url ${url}:`, err);
+              errors.push(`${url}: ${err.message}`);
+            }
+          }
+        }
+
+        if (!success) {
+          sheetDataCache[name] = [];
+          sheetFetchErrors[name] = errors;
+        }
       });
       await Promise.all(fetchPromises);
 
@@ -773,17 +823,28 @@ const AdminDashboard = () => {
 
       if (nameParsed && nameParsed.sheetName && nameParsed.colIndex >= 0) {
         const nameSheetRows = sheetDataCache[nameParsed.sheetName] || [];
+        console.log(`Matching name in sheet ${nameParsed.sheetName}. Rows found in cache:`, nameSheetRows.length);
         const nameRowsFromStart = nameParsed.startRowIndex > 0
           ? nameSheetRows.slice(nameParsed.startRowIndex)
           : nameSheetRows;
 
-        matchingRowIndices = [];
+        const tempIndices = [];
         nameRowsFromStart.forEach((row, idx) => {
-          const nameInSheet = row[nameParsed.colIndex] ? String(row[nameParsed.colIndex]).trim() : "";
+          const nameInSheet = row[nameParsed.colIndex] ? String(row[nameParsed.colIndex]).trim().replace(/\s+/g, ' ').toLowerCase() : "";
           if (nameInSheet === employeeName) {
-            matchingRowIndices.push(idx);
+            tempIndices.push(idx);
           }
         });
+
+        console.log(`Matched name indices for "${employeeName}":`, tempIndices);
+
+        // If name matching found results, use them; otherwise show all rows (fallback)
+        if (tempIndices.length > 0) {
+          matchingRowIndices = tempIndices;
+        } else {
+          console.warn(`No rows matched employeeName "${employeeName}" in column index ${nameParsed.colIndex}. Falling back to all rows.`);
+          matchingRowIndices = null;
+        }
       }
 
       const getColumnValues = (parsed, formatter = formatDateValue) => {
@@ -802,30 +863,87 @@ const AdminDashboard = () => {
 
       const plannedValues = getColumnValues(plannedParsed);
       const actualValues = getColumnValues(actualParsed);
-      const taskNameValues = getColumnValues(taskNameParsed);
       const delayValues = getColumnValues(delayParsed, formatDurationValue);
 
-      const maxLen = Math.max(plannedValues.length, actualValues.length, taskNameValues.length);
-      const rows = [];
-      for (let i = 0; i < maxLen; i++) {
-        const delayVal = delayValues[i] || "";
-        // Only show data where delay is present and non-zero
-        if (delayVal && delayVal !== "00:00:00" && delayVal !== "0") {
-          rows.push({
-            taskName: taskNameValues[i] || "",
-            planned: plannedValues[i] || "",
-            actual: actualValues[i] || "",
-            delay: delayVal
-          });
+      const targetSheetName = plannedParsed?.sheetName || nameParsed?.sheetName;
+      const allTargetRows = sheetDataCache[targetSheetName] || [];
+      const targetRowsFromStart = (plannedParsed?.startRowIndex > 0 ? allTargetRows.slice(plannedParsed.startRowIndex) : allTargetRows);
+
+      const getTaskNameFromRow = (row) => {
+        if (!row) return "";
+        // 1. If taskNameParsed is valid, use it
+        if (taskNameParsed && taskNameParsed.colIndex >= 0 && row[taskNameParsed.colIndex]) {
+          return String(row[taskNameParsed.colIndex]).trim();
         }
+        // 2. Fallback: search columns D, C, B in that order (common columns for step/stage names)
+        const possibleIndices = [3, 2, 1];
+        for (const colIdx of possibleIndices) {
+          if (row[colIdx] && String(row[colIdx]).trim() !== "" && colIdx !== nameParsed?.colIndex) {
+            const val = String(row[colIdx]).trim();
+            // Ignore if it's a date or a number
+            const isDate = val.includes("/") || val.includes("-") || val.includes(":");
+            if (!isDate) return val;
+          }
+        }
+        // 3. Fallback to nameParsed column if nothing else found
+        if (nameParsed && nameParsed.colIndex >= 0 && row[nameParsed.colIndex]) {
+          return String(row[nameParsed.colIndex]).trim();
+        }
+        return "";
+      };
+
+      const rows = [];
+      if (matchingRowIndices !== null) {
+        matchingRowIndices.forEach((idx, listIdx) => {
+          const row = targetRowsFromStart[idx];
+          if (!row) return;
+
+          const taskName = getTaskNameFromRow(row);
+          const planned = plannedValues[listIdx] || "";
+          const actual = actualValues[listIdx] || "";
+          const delayVal = delayValues[listIdx] || "";
+
+          if (taskName || planned || actual) {
+            rows.push({
+              taskName,
+              planned,
+              actual,
+              delay: delayVal
+            });
+          }
+        });
+      } else {
+        targetRowsFromStart.forEach((row, idx) => {
+          const taskName = getTaskNameFromRow(row);
+          const planned = plannedValues[idx] || "";
+          const actual = actualValues[idx] || "";
+          const delayVal = delayValues[idx] || "";
+
+          if (taskName || planned || actual) {
+            rows.push({
+              taskName,
+              planned,
+              actual,
+              delay: delayVal
+            });
+          }
+        });
       }
+
+      console.log("Final generated drilldown rows:", rows);
+      console.log("--- DRILLDOWN DEBUG END ---");
 
       setActiveDrillDown({
         taskId: task.taskName,
         type,
         title: `Total Achievement Details`,
         rows,
-        loading: false
+        loading: false,
+        rowsCount: targetRowsFromStart.length,
+        sheetsFetched: {
+          [targetSheetName]: allTargetRows.map(r => r[0] || "").slice(0, 10)
+        },
+        errors: sheetFetchErrors
       });
     } catch (error) {
       console.error("Error fetching drill-down data:", error);
@@ -915,6 +1033,7 @@ const AdminDashboard = () => {
         topBestPerformers={topBestPerformers}
         pendingTasks={sortedPendingList}
         departmentScores={departmentScores}
+        dataSheetRows={dataSheetRows}
       />
 
       {/* Employee List */}
