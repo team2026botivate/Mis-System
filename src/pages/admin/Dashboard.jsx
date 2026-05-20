@@ -21,6 +21,7 @@ import ChartsGrid from "./components/ChartsGrid";
 import DepartmentScoreChart from "../../components/charts/DepartmentScoreChart";
 import { useAuth } from "../../contexts/AuthContext";
 
+
 const getCurrentWeek = () => {
   const today = new Date();
   const startOfWeek = new Date(today);
